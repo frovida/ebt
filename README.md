@@ -1,10 +1,10 @@
 ###  extended Behavior Tree from the RVMI lab, Aalborg University Copenhagen, Denmark
 
-Developer: Francesco Rovida
-License: BSD
+Developer: Francesco Rovida  
+License: BSD  
 Last update: 05/10/2016  
 
-**Compatibility**: Has been tested with Ubuntu 14.04 and anaconda 4.2.0
+**Compatibility**: Has been tested with Ubuntu 14.04, Python 2.7 and anaconda 4.2.0
 
 **extended Behavior Tree** is an extention of the standard Behavior Tree model to integrate scripted and planned procedures, with a direct applicability for robot task management.
 
