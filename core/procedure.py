@@ -7,6 +7,7 @@ from copy import copy
 import conditions as cond
 from collections import defaultdict 
 from sets import Set
+import sys
 
 
 class ProcedurePreempted(Exception):
@@ -18,6 +19,13 @@ class ProcedurePreempted(Exception):
 class ProcedureBase:
     def getDescription(self):
         return (self._type, self._params, self._pre_conditions, self._hold_conditions, self._post_conditions)
+        
+    def setDescription(self, typein, paramsin, prein, holdin, postin):
+        self._type = copy(typein) 
+        self._params = deepcopy(paramsin)
+        self._pre_conditions = deepcopy(prein)
+        self._hold_conditions = deepcopy(holdin)
+        self._post_conditions = deepcopy(postin)
         
     def createDescription(self):
         """ Not implemented in abstract class. """
@@ -32,9 +40,9 @@ class ProcedureBase:
                 elif o == params.ParamOptions.Unspecify:
                     self._post_conditions += [self.getIsSpecifiedCond("Unset"+key, key, False)]
                 elif o == params.ParamOptions.Lock:
-                    self._pre_conditions += [self.getPropCond(key+'Idle', "deviceState", key, "Idle", True)]
-                    self._hold_conditions += [self.getPropCond(key+'Busy', "deviceState", key, "Idle", False)]
-                    self._post_conditions += [self.getPropCond(key+'Idle', "deviceState", key, "Idle", True)]
+                    self._pre_conditions += [self.getPropCond(key+'Idle', "StateProperty", key, "Idle", True)]
+                    self._hold_conditions += [self.getPropCond(key+'Busy', "StateProperty", key, "Idle", False)]
+                    self._post_conditions += [self.getPropCond(key+'Idle', "StateProperty", key, "Idle", True)]
            
     def generateDefParams(self):
         """
@@ -42,7 +50,8 @@ class ProcedureBase:
         """
         if not self._params.hasParam('Robot'):
             self._params.addParam("Robot", wm.Element("Agent"), params.ParamTypes.System)
-        #self._params.addParam("Skill", self.toElement(), params.ParamTypes.System)
+        #if not self._params.hasParam('Skill'):
+        #    self._params.addParam("Skill", self.toElement(), params.ParamTypes.System)
         
     def generateDefConditions(self):
         """
@@ -104,9 +113,10 @@ class ProcedureBase:
         return param_list
         
     def printInfo(self, verbose=False):
-        s = "{}\n".format(self._type) 
+        s = "{}".format(self._type) 
         if verbose:
-            s += self._params.printState() + '\n'
+            s += "["
+            s += self._params.printState() + ']\n'
             s += self.printConditions()
         return s
         
@@ -119,6 +129,9 @@ class ProcedureBase:
             s += '{}\n'.format(c._description)   
         return s
     
+    def toElement(self):
+        to_ret = wm.Element(self._type)
+        return to_ret
     
 class ProcedureDescription(ProcedureBase, object):
     def __init__(self):
@@ -132,6 +145,7 @@ class ProcedureDescription(ProcedureBase, object):
         self._post_conditions=[]
         self.createDescription()
         self.generateDefParams()
+        self.generateDefConditions()
         
                 
         
@@ -139,51 +153,79 @@ class ProcedureInterface(ProcedureBase):
     """
     """    
     #--------Class functions--------   
-    def __init__(self, children_processor=Serial):
+    def __init__(self, children_processor=Serial()):
         #Description
         self._type=""
         self._label=""
         self._description = ProcedureDescription()
         #Params
         self._params=params.ParamHandler()
+        self._remaps={}
         #Conditions
         self._pre_conditions=[]
         self._hold_conditions=[]
         self._post_conditions=[]
         #Connections
         self._parent = None
-        self._children=[]  
+        self._children=[] 
+        self._children_processor = children_processor 
         #Execution
         self._priority=0
         self._state=State.Uninitialized
         self._state_change = CEvent()
         self._progress=0
         self._preempt_request = CEvent()
-        self._has_instance = False
+        self._was_simulated = False
+        #Caches
+        self._max_cache = 2
         self._params_cache = []
         self._input_cache = []
-        self._max_cache = 2
-        self._was_simulated = False
-        self._children_processor = children_processor
-        self._remaps={}
+        self._remaps_cache = defaultdict(list)
                    
+    def getLightCopy(self):
+        """
+        Makes a light copy (only description, params and state)
+        """
+        p = self.__class__(self._children_processor)
+        p._children_processor = deepcopy(self._children_processor)
+        p._type=copy(self._type)
+        p._label=copy(self._label)
+        p._params = deepcopy(self._params)
+        p._remaps = deepcopy(self._remaps)
+        p._description = deepcopy(self._description)
+        p._pre_conditions = deepcopy(self._pre_conditions)
+        p._hold_conditions = deepcopy(self._hold_conditions)
+        p._post_conditions = deepcopy(self._post_conditions)
+        if self._state!=State.Uninitialized:
+            p._state = copy(self._state)
+            p._wm = self._wm            
+        return p
+        
     def step(self):
         if self.verifyPreempt():
             raise ProcedurePreempted("")
         self._progress += 1
-        print '[{}:{}]'.format(self._label, self._progress)
+        #print '[{}:{}]'.format(self._label, self._progress)
                    
     def setState(self, state):
         self._state = state  
         self._state_change.set()
 
+    def getParamsNoRemaps(self):
+        ph = params.ParamHandler()
+        ph.reset(self._params.getCopy())
+        for r1, r2 in self._remaps.iteritems():
+            ph.remap(r2, r1)
+        return ph
+            
     def clearRemaps(self):
         """
         Clear remaps
         """
-        for remap in self._remaps:
-            self.remap(remap[1], remap[0])
+        for r1, r2 in reversed(self._remaps.iteritems()):
+            self.remap(r2, r1)
         self._remaps={}
+        self._remaps_cache={}
             
     def copyRemaps(self, procedure):
         """
@@ -192,11 +234,28 @@ class ProcedureInterface(ProcedureBase):
         for r1, r2 in procedure._remaps.iteritems():
             self.remap(r1, r2)
         
-    def remap(self, initial_key, target_key):
+    def remap(self, initial_key, target_key, record=True):
         """
         Remap a parameter to a new key
         """
-        self._remaps[initial_key] = target_key
+        #log.error(self._label, "remap {} {} {}".format(self, initial_key, target_key))
+        if self._remaps.has_key(initial_key):
+            if self._remaps[initial_key]==target_key:#Redundant
+                #log.warn(self._label, "Ignoring redundant remap {}->{}".format(initial_key, target_key))
+                return
+            else:
+                #log.warn(self._label, "Key {} already remapped to {}. Can t remap to {}".format(initial_key, self._remaps[initial_key], target_key))
+                return
+        if self._remaps.has_key(target_key):
+            #log.warn(self._label, "Ignoring circular remap {}->{}".format(initial_key, target_key))
+            return
+            
+        if self._params.hasParam(target_key):
+            log.error(self._label, "Key {} already present in the map, remapping can shadow a parameter.".format(target_key))
+            return 
+        for c in self._children:
+            c.remap(initial_key, target_key)
+        #Remaps
         self._params.remap(initial_key, target_key)
         for c in self._pre_conditions:
             c.remap(initial_key, target_key)
@@ -204,9 +263,31 @@ class ProcedureInterface(ProcedureBase):
             c.remap(initial_key, target_key)
         for c in self._post_conditions:
             c.remap(initial_key, target_key)
-        for c in self._children:
-            c.remap(initial_key, target_key)
-        
+        #Records
+        if record:
+            self._remaps[initial_key] = target_key
+            remapid = len(self._params_cache)
+            if remapid>0: #If I have params cached, I cache also the remap to revert it afterwards
+                self._remaps_cache[remapid].append((initial_key, target_key))
+            
+            
+    def _revertRemaps(self):
+        """
+        Revert remaps. Just used in revertInput
+        """
+        remapid = len(self._params_cache)
+        try:
+            if self._remaps_cache[remapid]:
+                for remap in self._remaps_cache[remapid]:
+                    log.warn("REMAP", "Revert {} {}".format(remap[0], remap[1]))
+                    print self._remaps_cache
+                    self._remaps.pop(remap[0])
+                    self.remap(remap[1], remap[0], False)
+                del self._remaps_cache[remapid]
+        except:
+            print self.printInfo(True)
+            print self._remaps_cache
+            raise
             
     def init(self, wm):
         self._wm = wm
@@ -239,8 +320,8 @@ class ProcedureInterface(ProcedureBase):
         
     def simulate(self):
         self._was_simulated = True
+        #print "Simulate: {}".format(self.printInfo(True))
         for c in self._post_conditions:
-            #print c.getDescription()
             if not c.setTrue(self._params, self._wm):
                 log.error(c.getDescription(), "Simulation failed.")
                 return False
@@ -258,34 +339,38 @@ class ProcedureInterface(ProcedureBase):
         return True
         
     def start(self, input_params=None):
-        if self._state==State.Active:
-            print 'Waiting idle mode..'
-            self.waitState(State.Active, False)
+        #if self._state==State.Active:
+            #print 'Waiting idle mode..'
+            #self.waitState(State.Active, False)
         if input_params != None:          
-            self._params.setParams(input_params)
+            self._params.setParams(input_params, False)
         self.setState(State.Active)
         self._progress = 0
-        try:
-            result = self.execute()
-            if not result:
-                self.setState(State.Error)
-        except RuntimeError:
+        result = False
+        #try:
+        result = self.execute()
+        if not result:
             self.setState(State.Error)
-            log.error(self._label, "Runtime error during execution.")
-            result = False
-        except ProcedurePreempted:
-            self.setState(State.Preempted)
-            log.warn(self._label, "Preempted start")
-            result = False
-        finally:
-            if input_params != None:          
-                input_params.setParams(self._params)
-            return result
+        #except RuntimeError:
+        #    self.setState(State.Error)
+        #    log.error(self._label, "Runtime error during execution.")
+        #except ProcedurePreempted:
+        #    self.setState(State.Preempted)
+        #    log.warn(self._label, "Preempted start")
+        #except:
+        #    e = sys.exc_info()[0]
+        #    log.error(self._label, e)
+        #finally:
+        if input_params != None:          
+            input_params.setParams(self._params, False)
+        return result
                 
     def end(self, input_params=None):
         try:
             if self.verifyPreempt():
                 raise ProcedurePreempted("")
+            if input_params != None:          
+                self._params.setParams(input_params, False)
             result = self.postExecute()
             if not result:
                 self.setState(State.Error)
@@ -298,9 +383,9 @@ class ProcedureInterface(ProcedureBase):
             log.warn(self._label, "Preempted end")
             result = False
         finally:
-            if input_params != None:          
-                input_params.setParams(self._params)
-            self.setState(State.Completed)
+            #if input_params != None:          
+            #    input_params.setParams(self._params, False)
+            self.setState(State.Completed) 
             return result
         
     def preempt(self):
@@ -334,10 +419,16 @@ class ProcedureInterface(ProcedureBase):
         return visitor.process(self)
         
     def printInfo(self, verbose=False):
-        s = "{}-{}\n".format(self._type,self._label) 
+        s = "{}-{} ".format(self._type,self._label) 
         if verbose:
-            s += self._params.printState() + '\n'
+            s += "["
+            s += self._params.printState() + ']\n'
             s += self.printConditions()
+            s += "Remaps: \n"
+            for r1, r2 in self._remaps.iteritems():
+                s += r1+"->"+r2
+        else:
+            s += "\n"
         return s
         
     def printState(self, verbose=False):
@@ -347,20 +438,19 @@ class ProcedureInterface(ProcedureBase):
                 if self._children:
                     s += "({})".format(self._children_processor.printType()) 
                 #s += "({})".format(self._state) 
-                #s += "[{}]".format(self._params.printState()) 
+                s += "[{}]".format(self._params.printState()) 
+                #s += "\n[Remaps: {}]".format(self._remaps)  
+                #s += "[Remaps cache: {}]".format(self._remaps_cache)
                 #s += "[{}]".format(self.getModifiedParams()) 
             else:
                 s += "({})".format('abstract') 
         return s
-        
-    def specify(self, key, values):
-        """
-        Specify a value and set it as default value too
-        """
-        self._params.specifyDefault(key, values)
-                 
+                         
     def getParent(self):
         return self._parent
+        
+    def hasChildren(self):
+        return len(self._children)>0        
         
     def addChild(self, p, latch=False):
         if isinstance(p, list):
@@ -387,6 +477,12 @@ class ProcedureInterface(ProcedureBase):
         child = self._children.pop()
         child._parent = None
         
+    def specify(self, key, values):
+        """
+        Specify a value and set it as default value too
+        """
+        self._params.specifyDefault(key, values)
+        
     def specifyInput(self, key, values):
         """
         Specify a parameter and update the input cache
@@ -395,27 +491,47 @@ class ProcedureInterface(ProcedureBase):
         if self._input_cache:
             if key in self._input_cache[-1]:
                 self._input_cache[-1][key].setValues(values)
+                
+    def specifyParams(self, input_params):
+        """
+        Set the parameters and makes them default (they will no more be overwritten by setInput)
+        """
+        self._params_cache.append(self._params.getCopy())
+        self._input_cache.append(input_params.getCopy())             
+        self._params.specifyParams(input_params)
         
     def setInput(self, input_params):
+        """
+        Set the parameters. Params already specified with specifyInputs are preserved
+        """
         self._params_cache.append(self._params.getCopy())
         self._input_cache.append(input_params.getCopy())
-        #Online params already specified are preserved
+        input_copy = params.ParamHandler()
+        input_copy.reset(input_params.getCopy())
         for k, p in self._params.getParamMap().iteritems():
             v = p.getDefaultValue()
-            #if(k=='PlacingCell'): print '{} {}'.format(p.valueType(), isinstance(p.getValue(), wm.Element))
-            if isinstance(v, wm.Element) and input_params.hasParam(k):
-                #if(k=='PlacingCell'): print '{}: {} {}'.format(k, p.getValue()._id, input_params.getParamValue(k)._id)
-                if v._id>0 and p.getValue()._id!=input_params.getParamValue(k)._id:
-                    input_params.specify(k, v)                
-        self._params.setParams(input_params)
+            if isinstance(v, wm.Element) and input_copy.hasParam(k):
+                if v._id>0 and p.getValue()._id!=input_copy.getParamValue(k)._id:
+                    input_copy.specify(k, v)                
+        self._params.setParams(input_copy)
         #Erase the oldest cache if the max lenght is reached
         if len(self._params_cache)>self._max_cache:
-            self._params_cache.pop(0)
+            self._popCache()
+            
+    def _popCache(self):
+        self._params_cache.pop(0)
+        for i in range(self._max_cache+1):
+            if not self._remaps_cache.has_key(i):     
+                continue
+            del self._remaps_cache[i]
+            if self._remaps_cache.has_key(i+1):
+                self._remaps_cache[i] = self._remaps_cache[i+1]
     
     def revertInput(self):
         if not self._params_cache:
             log.warn("revertInput", "No cache available, can't revert input.")
             return None
+        self._revertRemaps()
         self._params.reset(deepcopy(self._params_cache.pop()))
         return deepcopy(self._input_cache.pop())
     
@@ -468,27 +584,42 @@ class ProcedureInterface(ProcedureBase):
         self._type = description._type        
         self.resetDescription()
         
-    def resetDescription(self):
-        self._params = deepcopy(self._description._params)
+    def resetDescription(self, other=None):
+        if other:
+            self._params.reset(self._description._params.merge(other._params))
+        else:
+            self._params = deepcopy(self._description._params)
         self._pre_conditions = deepcopy(self._description._pre_conditions)
         self._hold_conditions = deepcopy(self._description._hold_conditions)
         self._post_conditions = deepcopy(self._description._post_conditions)
         self._children = []
+        
+    def mergeDescription(self, other):
+        self.resetDescription(other)
+        for c in other._pre_conditions:
+            if not c in self._pre_conditions:
+                self.addPreCondition(c)
+        for c in other._hold_conditions:
+            if not c in self._hold_conditions:
+                self.addHoldCondition(c)
+        for c in other._post_conditions:
+            if not c in self._post_conditions:
+                self.addPostCondition(c)                
                        
     def addPreCondition(self, condition):
         self._pre_conditions.append(condition)
-        for remap in self._remaps:
-            self._pre_conditions[-1].remap(remap[0], remap[1])
+        for r1, r2 in self._remaps.iteritems():
+            self._pre_conditions[-1].remap(r1, r2)
         
     def addHoldCondition(self, condition):
         self._hold_conditions.append(condition)
-        for remap in self._remaps:
-            self._hold_conditions[-1].remap(remap[0], remap[1])
+        for r1, r2 in self._remaps.iteritems():
+            self._hold_conditions[-1].remap(r1, r2)
             
     def addPostCondition(self, condition):
         self._post_conditions.append(condition)
-        for remap in self._remaps:
-            self._post_conditions[-1].remap(remap[0], remap[1])        
+        for r1, r2 in self._remaps.iteritems():
+            self._post_conditions[-1].remap(r1, r2)  
         
     def processChildren(self, visitor):
         """
@@ -511,38 +642,43 @@ class ProcedureInterface(ProcedureBase):
     def onPreempt(self):
         """ Optional, Not implemented in abstract class. """
         return True
-                
+        
     def hasInstance(self):
-        return self._has_instance
+        """ Wrapper procedures override this """
+        return True
+                   
         
-    def setInstance(self, instance):
+class ProcedureInstance(ProcedureInterface, object):     
+    def getLightCopy(self):
         """
-        instance must be a function. This will be executed when calling execute()
+        Makes a light copy (only description, params and state)
         """
-        self._instance = instance
-        self._has_instance = True     
-    
+        p = self.__class__(self._children_processor)
+        p._children_processor = deepcopy(self._children_processor)
+        p._type=self._type
+        p._label=self._label
+        p._params = deepcopy(self._params)
+        p._remaps = deepcopy(self._remaps)
+        p._description = deepcopy(self._description)
+        p._pre_conditions = deepcopy(self._pre_conditions)
+        p._hold_conditions = deepcopy(self._hold_conditions)
+        p._post_conditions = deepcopy(self._post_conditions)
+        if self._state!=State.Uninitialized:
+            p._state = self._state
+            p._wm = self._wm       
+            p._instanciator = self._instanciator  
+        return p       
         
-class ProcedureInstance(ProcedureInterface, object):                
     def init(self, wmi, instanciator):
         self._wm = wmi
         self._instanciator = instanciator
         self.createDescription()
         self.generateDefParams()
         self._children_processor = Serial()
-        self._remaps={}
         if self.onInit():
             self.setState(State.Idle)
             self.generateDefConditions()
-                    
-    def hasInstance(self):
-        return True
-        
-    def toElement(self):
-        to_ret = wm.Element(self._type, self._label)
-        #Todo:add params, etc.
-        return to_ret
-        
+                                    
     def onInit(self):
         """ Optional, Not implemented in abstract class. """
         return True
@@ -591,9 +727,14 @@ class NodeInstanciator():
         procedure = pclass()
         procedure.init(self._wm, self)
         if not procedure._type in self._available_descriptions:
-            self._available_descriptions[procedure._type] = procedure
+            self._available_descriptions[procedure._type] = self._makeDescription(procedure)
         self._available_instances[procedure._type].append(procedure)
         return procedure
+        
+    def _makeDescription(self, procedure):
+        to_ret = ProcedureDescription()
+        to_ret.setDescription(*procedure.getDescription())
+        return to_ret
         
     def expandAll(self):
         for _, ps in self._available_instances.iteritems():
@@ -630,14 +771,18 @@ class NodeInstanciator():
         else:
             log.error("assignInstance", "No instances of type {} found.".format(procedure._type))
         
-    def printState(self, verbose=True):
-        s = 'Procedures:\n'
+    def printState(self, verbose=True, filter_type=""):
+        s = 'Descriptions:\n'
         for t, p in self._available_descriptions.iteritems():
-            s += p.printInfo(verbose)
-        s += 'Instances:\n'
+            if p._type==filter_type or filter_type=="":
+                s += p.printInfo(verbose)
+                s += '\n'
+        s += '\nInstances:\n'
         for k, l in self._available_instances.iteritems():
             for p in l:
-                s += p.printInfo(verbose)
+                if p._type==filter_type or filter_type=="":
+                    s += p.printInfo(verbose)
+                    s += '\n'
         return s
 
 class ProcedureWrapper(ProcedureInterface):
@@ -661,12 +806,37 @@ class ProcedureWrapper(ProcedureInterface):
         self._state=State.Uninitialized
         self._state_change = CEvent()
         self._has_instance = False
+        self._children_processor = Serial()
+        if instanciator:
+            instanciator.assignDescription(self)
+        #Caches
+        self._max_cache = 2
         self._params_cache = []
         self._input_cache = []
-        self._max_cache = 2
-        self._children_processor = Serial()
-        instanciator.assignDescription(self)
-                    
+        self._remaps_cache = defaultdict(list)
+                               
+    def getLightCopy(self):
+        """
+        Makes a light copy (only description and params)
+        """
+        p = ProcedureWrapper(self._type, self._label, self._priority)
+        p._params = deepcopy(self._params)
+        p._remaps = deepcopy(self._remaps)
+        p._description = deepcopy(self._description)
+        p._pre_conditions = deepcopy(self._pre_conditions)
+        p._hold_conditions = deepcopy(self._hold_conditions)
+        p._post_conditions = deepcopy(self._post_conditions)
+        if self._has_instance:
+            p._has_instance=self._has_instance
+            p._instance=self._instance
+        if self._state!=State.Uninitialized:
+            p._state = copy(self._state)
+            p._wm = self._wm            
+        return p
+        
+    def hasInstance(self):
+        return self._has_instance
+        
     def setInstance(self, instance):
         """
         instance must be a ProcedureInstance
@@ -685,15 +855,23 @@ class ProcedureWrapper(ProcedureInterface):
     def getInstance(self):
         return self._instance
         
+    def _copyInstanceParams(self):
+        self._params.setParams(self._instance._params, False)
+        for k, p in self._instance._params._params.iteritems():#Hack to get remapped key back
+            if k in self._remaps:
+                self._params.specify(self._remaps[k], p.getValues())
+        
     def execute(self):
         #print '{}:{}'.format(self._label, self._instance)
-        result = self._instance.start(self._params)
+        result = self._instance.start(self.getParamsNoRemaps())
+        self._copyInstanceParams()
         if not result:
             self.setState(self._instance._state)
         return result
     
     def postExecute(self):
-        result = self._instance.end(self._params)
+        result = self._instance.end(self.getParamsNoRemaps())
+        self._copyInstanceParams()
         if not result:
             self.setState(self._instance._state)
         return result
@@ -711,6 +889,7 @@ class Root(ProcedureInterface):
         self._type="Root"
         self._label=name
         self._priority=0
+        self._description = ProcedureDescription()
         #Params
         self._params=params.ParamHandler()
         self._remaps={}
@@ -727,6 +906,7 @@ class Root(ProcedureInterface):
         self._input_cache = []
         self._max_cache = 2
         self._children_processor = Serial()
+        self._remaps_cache = defaultdict(list)
         if wm:
             self.init(wm)
         
@@ -737,161 +917,6 @@ class Root(ProcedureInterface):
         return True
         
     def execute(self):
-        return True
-        
-class Operator(ProcedureInterface): 
-    def __init__(self, wmi=None):
-        #Connections
-        self._parent = None
-        self._children=[]  
-        #Description
-        self._priority=0
-        #Params
-        self._params=params.ParamHandler()
-        self._remaps={}
-        #Conditions
-        self._pre_conditions=[]
-        self._hold_conditions=[]
-        self._post_conditions=[]
-        #Execution
-        self._state=State.Uninitialized
-        self._has_instance = False
-        self._params_cache = []
-        self._input_cache = []
-        self._max_cache = 2
-        self._children_processor = Serial()
-        if wmi:
-            self.init(wmi)
-                  
-    def simulate(self):
-        self._was_simulated = True
-        return self.execute()
-            
-    def revertSimulation(self):
-        if not self._was_simulated:
-            log.warn("revert", "No simulation was made, can't revert.")
-            return False
-        return self.revertExecute()
-        
-    def hasInstance(self):
-        return True
-        
-    def createDescription(self):
-        return        
-        
-    def execute(self):
-        """ Not implemented in abstract class. """
-        raise NotImplementedError("Not implemented in abstract class")
-        
-    def revertExecute(self):
-        """ Not implemented in abstract class. """
-        raise NotImplementedError("Not implemented in abstract class")
-    
-class ground(Operator):
-    def __init__(self, wmi, parameters, conditions):
-        #Connections
-        self._parent = None
-        self._children=[]  
-        #Description
-        self._type="Function"
-        self._label='ground'
-        self._priority=0
-        #Params
-        self._params=params.ParamHandler()
-        self._params.reset(parameters.getCopy())
-        self._remaps={}
-        #Conditions
-        self._pre_conditions=[]
-        self._post_conditions=[]
-        #Execution
-        self._state=State.Uninitialized
-        self._has_instance = False
-        self._params_cache = []
-        self._input_cache = []
-        self._max_cache = 2
-        self._children_processor = Serial()
-        if wmi:
-            self.init(wmi)
-        #More
-        self._conditions = conditions
-        self._copy = params.ParamHandler()
-            
-    def createDescription(self):
-        return        
-        
-    def execute(self):        
-        to_resolve = [key for key, param in self._params.getParamMap().iteritems() if param.paramType()!=params.ParamTypes.Optional and param.valueType()==type(wm.Element()) and param.getValue()._id < 0]
-        if not to_resolve:
-            return        
-        self._copy.reset(self._params.getCopy())
-        for c in self._conditions:
-            c.setDesiredState(self._params) 
-        matches = self._wm.resolveElements(to_resolve, self._params)
-        grounded = ''
-        for key, match in matches.iteritems():
-            if match.any():
-                if isinstance(key, tuple):
-                    for i, key2 in enumerate(key):
-                        self._params.specify(key2, match[0][i]) 
-                        grounded += match[0][i].printState() + ' '
-                else:
-                    self._params.specify(key, match[0])
-                    grounded += match[0].printState() + ' '
-            else: 
-                log.warn("ground", "Can t ground param {} with {}.".format(key, self._params.getParamValue[key].printState()))
-                return False
-        log.info("Grounding: " + str(to_resolve) + grounded)
-        return True
-        
-    def revertExecute(self):
-        self._params.reset(self._copy.getCopy())
-        return True
-                   
-class swap(Operator):
-    def createDescription(self):
-        self._type="Function"
-        self._label='swap'
-        self._params.addParam("Left", wm.Element("Thing"), params.ParamTypes.Online)
-        self._params.addParam("Right", wm.Element("Thing"), params.ParamTypes.Online)
-        return        
-        
-    def execute(self):
-        key1=self._remaps["Left"]
-        key2=self._remaps["Right"]
-        left = self._params.getParamValues(key1)
-        right = self._params.getParamValues(key2)
-        self._params.specify(key1, right)
-        self._params.specify(key2, left)
-        return True
-        
-    def revertExecute(self):
-        key1=self._remaps["Left"]
-        key2=self._remaps["Right"]
-        left = self._params.getParamValues(key1)
-        right = self._params.getParamValues(key2)
-        self._params.specify(key1, right)
-        self._params.specify(key2, left)
-        return True
-        
-class copy(Operator):
-    def createDescription(self):
-        self._type="Function"
-        self._label='copy'
-        self._params.addParam("From", wm.Element("Thing"), params.ParamTypes.Online)
-        self._params.addParam("To", wm.Element("Thing"), params.ParamTypes.Online)
-        return        
-        
-    def execute(self):
-        key1=self._remaps["From"]
-        key2=self._remaps["To"]
-        copy = self._params.getParamValues(key1)
-        self.old = self._params.getParamValues(key2)
-        self._params.specify(key2, copy)
-        return True
-        
-    def revertExecute(self):
-        key2=self._remaps["To"]
-        self._params.specify(key2, self.old)
         return True
         
 class Procedure(ProcedureInterface): 
@@ -903,6 +928,7 @@ class Procedure(ProcedureInterface):
         self._type="Procedure"
         self._label=name
         self._priority=0
+        self._description = ProcedureDescription()
         #Params
         self._params=params.ParamHandler()
         self._remaps={}
@@ -915,12 +941,14 @@ class Procedure(ProcedureInterface):
         self._state=State.Uninitialized
         self._state_change = CEvent()
         self._has_instance = False
-        self._params_cache = []
-        self._input_cache = []
         self._max_cache = 2
         self._children_processor = children_processor
         if wm:
             self.init(wm)
+        #Cache
+        self._params_cache = []
+        self._input_cache = []
+        self._remaps_cache = defaultdict(list)
         
     def createDescription(self):
         return        

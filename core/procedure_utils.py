@@ -18,10 +18,8 @@ class NodePrinter():
         self._indend -= 2
     
     def printProcedure(self, procedure, verbose=True):
-        s = "-"*self._indend + self._prefix + procedure.printState(verbose)
-        #s+=self.printParams(procedure._params)
-        print s
-        #procedure.printConditions()
+       return "-"*self._indend + self._prefix + procedure.printState(verbose)
+       #return "-"*self._indend + self._prefix + procedure.printInfo(verbose)
         
     def printParams(self,  params):
         to_ret = "\n"
@@ -49,7 +47,13 @@ class NodeExecutor():
     def _printTracked(self): 
         for key in self._tracked_params:
             if self._params.hasParam(key):
-                print key + ' ' + self._params.getParamValue(key).printState()
+                e = self._params.getParamValue(key)
+                print key + ' ' + e.printState(False)
+                if e._id>=0:
+                    s = "Relations: ["
+                    for r in self._wm.getContextRelations(e):
+                        s += "{}-{}-{},".format(r["src"],r["type"],r["dst"])
+                    print s + "]"
             else:
                 print key + ' not available.'  
                 
@@ -63,23 +67,31 @@ class NodeExecutor():
     def mergeParams(self, procedure):
         self._params.reset(self._params.merge(procedure._params)) 
         self._printTracked()
+        #print "Merge: {}".format(self._params.printState())
         
     def inferUnvalidParams(self, procedure):
         #print '{}: {} '.format(procedure._label, self.printParams(procedure._params))
-        unvalid_params = procedure.checkPreCond()
+        unvalid_params = procedure.checkPreCond(True)
         if unvalid_params:
-            #log.info("[{}] Reset unvalid params {}".format(procedure._label, unvalid_params))
-            procedure._params.setDefault(unvalid_params)
+            log.info("[{}] Reset unvalid params {}".format(procedure._label, unvalid_params))
+            for k in unvalid_params:
+                procedure._params.setDefault(k)
+                p = procedure._params.getParam(k)
+                if p.valueTypeIs(wm.Element()) and p.getValue()._id>=0:
+                    procedure._params.specify(k, self._wm.getElement(p.getValue()._id)) 
             return self.autoParametrizeBB(procedure) 
         return True
         
     def autoParametrizeBB(self, procedure):
         """
         Ground undefined parameters with parameters in the Black Board
-        """              
+        """            
+        #print procedure._params.printState()
         to_resolve = [key for key, param in procedure._params.getParamMap().iteritems() if param.paramType()!=params.ParamTypes.Optional and param.valueType()==type(wm.Element()) and param.getValue()._id < 0]
         if not to_resolve:
             return True
+        #print to_resolve
+        #print self.printParams(self._params)
         remap = {}
         cp = params.ParamHandler()
         cp.reset(procedure._params.getCopy())
@@ -91,6 +103,8 @@ class NodeExecutor():
                 if p.valueTypeIs(wm.Element()):
                     if p.getValue().isInstance(cp.getParamValue(key), self._wm):
                         remap[key].append(k)
+                    else:
+                        pass#log.info("Not instance", "{} Model: {} Match: {}".format(key, cp.getParamValue(key).printState(True), p.getValue().printState(True)))
                         
         l = np.zeros(len(to_resolve), dtype=int)
         unvalid_params = to_resolve
@@ -118,7 +132,7 @@ class NodeExecutor():
         remapped = ''
         for index, key in enumerate(to_resolve):
             if key != remap[key][l[index]]:
-        #        procedure.remap(key, remap[key][l[index]])
+                procedure.remap(key, remap[key][l[index]])
                 remapped += "[{}={}]".format(key, remap[key][l[index]])
         log.info("MatchBB","{}: {}".format(procedure._label, remapped))
         return True
@@ -134,15 +148,15 @@ class NodeExecutor():
                 if isinstance(key, tuple):
                     for i, key2 in enumerate(key):
                         procedure._params.specify(key2, match[0][i]) 
-                        grounded += '[{}:{}]'.format(key2, match[0][i].printState())
+                        grounded += '[{}={}]'.format(key2, match[0][i].printState())
                 else:
                     procedure._params.specify(key, match[0])
-                    grounded += '[{}:{}]'.format(key, match[0].printState())
+                    grounded += '[{}={}]'.format(key, match[0].printState())
             else: 
-                print '{}: {}'.format(procedure._label, to_resolve)
+                #print '{}: {}'.format(procedure._label, to_resolve)
                 log.error("autoParametrizeWm", "Can t autoparametrize param {}.".format(key))
                 return False
-        log.info("Ground", "{}: {}".format(procedure._label, grounded))
+        log.info("MatchWm", "{} {}".format(procedure._label, grounded))
         return True
     
     def init(self, procedure):
@@ -222,6 +236,9 @@ class NodeMemorizer:
     def memorize(self, procedure, tag):
         #self._debug("Memorize " + procedure.printInfo(False))
         self._tree.append((procedure, tag))
+
+    def hasIndex(self, index):
+        return abs(index)<len(self._tree)
         
     def recall(self, index=None):
         if self._tree:
@@ -241,10 +258,19 @@ class NodeMemorizer:
             print p[0].printState() + '-' + p[1]
         
 class TreeBuilder:
+    """
+    Builds a new tree with root in self._execution_root
+    self._execution_branch is used to know which are the immediate parents
+    self._forget_branch is used to get back previous parents
+    """
     def __init__(self, wmi):
         self._wm = wmi
+        #list of parents
         self._execution_branch = []
+        #list of previous parents
         self._forget_branch = []
+        #list of previous parents
+        self._static_branch = []
                   
     def removeExecutionNode(self):
         if self._execution_branch:
@@ -253,15 +279,37 @@ class TreeBuilder:
                 parent.popChild()
             return self._execution_branch.pop()
         
-    def restoreExecutionNode(self):
+    def restoreParentNode(self):
         if self._forget_branch:
             self._execution_branch.append(self._forget_branch.pop())
         
-    def popExecutionNode(self):
+    def popParentNode(self):
         self._forget_branch.append(self._execution_branch.pop())
+       
+    def makeParentStatic(self, parent_name, static=False):
+        if self._execution_branch[-1]._label!=parent_name and self._forget_branch[-1]._label!=parent_name and static:
+            log.error("makeParentStatic", "Exe: {} Forgot: {} Looking for: {}".format(self._execution_branch[-1]._label, self._forget_branch[-1]._label, parent_name))
+            return
+            
+        if static:
+            if self._execution_branch[-1]._label==parent_name:
+                self._static_branch.append((self._execution_branch.pop(), True)) 
+                log.info("makeParentStatic", "Storing: {} {}".format(parent_name, True))
+            else:
+                self._static_branch.append((self._forget_branch.pop(), False))   
+                log.info("makeParentStatic", "Storing: {} {}".format(parent_name, False))         
+        else:
+            if self._static_branch:
+                if parent_name==self._static_branch[-1][0]._label:
+                    p, tag = self._static_branch.pop()
+                    log.info("makeParentStatic", "Restoring: {} {}".format(parent_name, tag))
+                    if tag:
+                        self._execution_branch.append(p) 
+                    else:
+                        self._forget_branch.append(p)                 
         
     def addExecutionNode(self, procedure):
-        p = deepcopy(procedure)
+        p = procedure.getLightCopy()
         p._children = []
         parent = self.getExecutionParent()
         self._execution_branch.append(p)
@@ -297,10 +345,12 @@ class TreeBuilder:
 class NodeReversibleSimulator(NodeExecutor, TreeBuilder):
     def __init__(self):
         self._simulate=True
+        self.static = NodeMemorizer('Static')
         self.forward = NodeMemorizer('Forward')
         self.back = NodeMemorizer('Backward')
         self._execution_branch = []
         self._forget_branch = []
+        self._static_branch = []
         self._bound = {}
         
     def addInExecutionTree(self, procedure, processor=Serial):        
@@ -325,6 +375,34 @@ class NodeReversibleSimulator(NodeExecutor, TreeBuilder):
         self.undo()
         self.back.forget()
 
+    def makeStaticPrevious(self):        
+        procedure = self.forward.recall()[0]._label
+        log.warn("makeStaticPrevious", "Procedure {}".format(procedure))
+        if not isinstance(self.getExecutionParent()._children_processor, Parallel):
+            log.warn("makeStaticPrevious", "Procedure {} has a serial parent. Reverting till {}".format(procedure, self.getExecutionParent()._label))
+            procedure = self.getExecutionParent()._label
+        self.makeStatic(True)
+        while procedure!=self.forward.recall()[0]._label:
+            print self.forward.recall()[0]._label
+            self.makeStatic(True)
+        self.makeStatic(True)
+        
+    def makeStaticAll(self, static=False):
+        if static:
+            while self.forward.hasMemory():
+                self.makeStatic(static)
+        else:
+            while self.static.hasMemory():
+                self.makeStatic(static)
+        
+    def makeStatic(self, static=False):
+        if static:
+            self.makeParentStatic(self.forward.recall()[0]._label, static)
+            self.static.memorize(*self.forward.forget())
+        else:
+            self.makeParentStatic(self.static.recall()[0]._label, static)
+            self.forward.memorize(*self.static.forget())         
+            
     def undoPrevious(self):        
         procedure = self.forward.recall()[0]
         self.undo()
@@ -338,18 +416,22 @@ class NodeReversibleSimulator(NodeExecutor, TreeBuilder):
         while procedure!=self.back.recall()[0]:
             self.redo()
         self.redo()
-        
-    def undo(self):
-        if not self.forward.hasMemory():
-            return False
+    
+    def forget(self):
+        #TODO: possible mess with parentNode in execution tree...
         procedure, tag = self.forward.forget()
         if self._verbose:
-            log.info("undo", "{}-{}".format(procedure._label, tag))
+            log.info("Undo {} {}.".format(procedure._label, tag))
         if tag=='execute':
             self.revert(procedure)
         elif tag=='postExecute':
             self.postRevert(procedure)
-        self.back.memorize(procedure, tag)
+        return (procedure, tag)
+        
+    def undo(self):
+        if not self.forward.hasMemory():
+            return False
+        self.back.memorize(*self.forget())
         return True
     
     def undoAll(self):
@@ -382,26 +464,27 @@ class NodeReversibleSimulator(NodeExecutor, TreeBuilder):
         return True
     
     def parametrize(self, procedure):
-        procedure.setInput(self._params)#No execution...
+        procedure.setInput(self._params)
         if not self.ground(procedure):
             if not self.tryOther(procedure):
                 return False
-        if not self._execute(procedure):
-            return False    
         return True
     
-    def execute(self, procedure, remember=True, processor=Serial):
+    def initAndParametrize(self, procedure):
         self.init(procedure)
-        procedure.setInput(self._params)#No execution...
         if not self.parametrize(procedure):
             return False
-        if remember:
-            self.addInExecutionTree(procedure, processor) 
-            procedure.hold()
-            self.mergeParams(procedure)#Update params
-            self.forward.memorize(procedure, "execute")
+        return True
+    
+    def execute(self, procedure, processor=Serial):
+        if not self.initAndParametrize(procedure):
+            return False
         if self._verbose:
-            log.info("Execute {}".format(procedure._label))
+            log.info("Execute {}.".format(procedure._label))
+        self.addInExecutionTree(procedure, processor) 
+        procedure.hold()
+        self.mergeParams(procedure)#Update params
+        self.forward.memorize(procedure, "execute")          
         return True
     
     def revert(self, procedure):
@@ -410,26 +493,28 @@ class NodeReversibleSimulator(NodeExecutor, TreeBuilder):
         self.removeExecutionNode()
         return True
     
-    
-    def postExecute(self, procedure):
+    def postExecute(self, procedure, remember=True):
         procedure.setInput(self._params)#Re-apply parameters, after processing the sub-tree.... Important, thay have been modified by the subtree!
         if self._verbose:
-            log.info("postExecute {}".format(procedure._label))
+            log.info("postExecute {}.".format(procedure._label))
         if not self._postExecute(procedure):
             return False
         self.mergeParams(procedure)#Update params
         self.forward.memorize(procedure, "postExecute")
-        self.popExecutionNode()
+        if procedure._label != self.getExecutionParent()._label:
+            log.error("postExecution", "{} trying to close before the parent {}".format(procedure._label, self.getExecutionParent()._label))
+            raise KeyError()
+        self.popParentNode()
         if id(procedure) in self._bound:
-            self.postExecute(self._bound.pop(id(procedure)))
+            self.postExecute(self._bound.pop(id(procedure)))      
         return True
-    
+        
     def postRevert(self, procedure):
         if not procedure.revertSimulation():
             log.error("undo", "Can't revert {}".format(procedure.printState()))
             return False 
         self.setParams(procedure.revertInput())
-        self.restoreExecutionNode() 
+        self.restoreParentNode() 
         #print 'miei ' + self.printParams(procedure._params)
         return True
          

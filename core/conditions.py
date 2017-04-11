@@ -2,7 +2,7 @@ import params
 import world_model as wm
 from copy import deepcopy
 
-class ConditionBase:
+class ConditionBase(object):
     """
     """    
     def __init__(self, clabel, subj, desired_state):            
@@ -11,6 +11,18 @@ class ConditionBase:
         self._label=clabel  
         self._description=""        
           
+    def __eq__(self, other):
+        if self.isEqual(other):
+            return True
+        else:
+            return False
+        
+    def __ne__(self, other):
+        if self.isEqual(other):
+            return False
+        else:
+            return True
+        
     def remap(self, initial_key, target_key):
         if self._subject_key==initial_key:
             self._subject_key=target_key
@@ -23,7 +35,13 @@ class ConditionBase:
             return l[0]
         else:
             return -1
-          
+    
+    def getParamId(self, key):
+        if self._params:
+            return self._params.getParamValue(key)._id
+        else:
+            raise
+    
     def getKeys(self):
         return [self._subject_key]
         
@@ -45,6 +63,9 @@ class ConditionBase:
     def setDesiredState(self, ph):
         """ Used to resolve the element in the world model. """
         raise NotImplementedError("Not implemented in abstract class")
+    def isEqual(self, other):
+        """ Equality function. """
+        raise NotImplementedError("Not implemented in abstract class")
     
     
 class ConditionProperty(ConditionBase):
@@ -65,9 +86,9 @@ class ConditionProperty(ConditionBase):
             
     def hasConflict(self, other):
         if isinstance(other, ConditionProperty):
-            return self._subject_key==other._subject_key and self._owl_label==other._owl_label and self._value==other._value and self._desired_state!=other._desired_state 
-        else:
-            return False 
+            if self._owl_label==other._owl_label and self._value==other._value and self._desired_state!=other._desired_state:
+                return self.getParamId(self._subject_key)==other.getParamId(other._subject_key) or self._subject_key==other._subject_key
+        return False 
             
     def _setDescription(self):  
         self._description = "[{}] {}-{}-{} ({})".format(self._label, 
@@ -106,7 +127,7 @@ class ConditionProperty(ConditionBase):
             if not subj.hasValue(self._owl_label, self._value):
                 subj.appendProperty(self._owl_label, self._value)
         else:
-            if subj.hasValue(self._owl_label, self._value):
+            while subj.hasValue(self._owl_label, self._value):
                 subj.removePropertyValue(self._owl_label, self._value)
         self._params.specify(self._subject_key, subj)
         self._wm.updateElement(subj)
@@ -161,9 +182,10 @@ class ConditionRelation(ConditionBase):
             
     def hasConflict(self, other):
         if isinstance(other, ConditionRelation):
-            return self._subject_key==other._subject_key and self._owl_label==other._owl_label and self._object_key==other._object_key and self._desired_state!=other._desired_state 
-        else:
-            return False
+            if self._owl_label==other._owl_label and self._desired_state!=other._desired_state:
+                #print "{}=={} and {}=={}".format(self.getParamId(self._subject_key), other.getParamId(other._subject_key), self.getParamId(self._object_key), other.getParamId(other._object_key))
+                return (self.getParamId(self._subject_key)==other.getParamId(other._subject_key) and self.getParamId(self._object_key)==other.getParamId(other._object_key)) or (self._subject_key==other._subject_key and self._object_key==other._object_key)
+        return False
             
     def _setDescription(self):  
         self._description = "[{}] {}-{}-{} ({})".format(self._label, 
@@ -245,9 +267,9 @@ class ConditionHasProperty(ConditionBase):
             
     def hasConflict(self, other):
         if isinstance(other, ConditionHasProperty):
-            return self._subject_key==other._subject_key and self._owl_label==other._owl_label and self._desired_state!=other._desired_state 
-        else:
-            return False
+            if self._owl_label==other._owl_label and self._desired_state!=other._desired_state:
+                return self.getParamId(self._subject_key)==other.getParamId(other._subject_key) or self._subject_key==other._subject_key
+        return False
         
     def _setDescription(self):  
         self._description = "[{}] {}-{} ({})".format(self._label, 

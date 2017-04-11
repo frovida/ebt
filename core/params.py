@@ -1,5 +1,4 @@
-        
-from enum import Enum 
+from flufl.enum import Enum 
 import numpy as np
 from copy import deepcopy
 import logger.logger as log
@@ -12,28 +11,42 @@ Config: like offline, but constant
 Optional: not mandatory in input, get specified in output
 System: added automatically
 """
-ParamTypes = Enum('ParamTypes', 'Online Offline Hardware Config Optional System Discrete')
+ParamTypes = Enum('ParamTypes', 'Online Offline Hardware Templated Optional Planning Config Symbolic Discrete System')
 """
 Consume: (postCondition) unspecify and remove from world model 
 Unspecify: (postCondition) unspecify
+Lock: (postCondition) Set state to busy during procedure execution
 """
 ParamOptions = Enum('ParamOptions', 'Consume Unspecify Lock')  
+
+ParamState = Enum('ParamState', 'Initialized Specified')  
+
 
 class Param:
     """
     """
-    def __init__(self, key, description, value_type, param_type):            
+    def __init__(self, key, description, value_type, param_type, lenght=-1):            
         self._key=key          
         self._description=description   
-        self._param_type=param_type
+        if isinstance(param_type, int):
+            self._param_type=ParamTypes(param_type+1)
+        else:
+            self._param_type=param_type
         if isinstance(value_type, list):
             self._default = value_type
             self._values = value_type
             self._value_type = type(value_type[0])
+            self._state = ParamState.Specified
+        elif isinstance(value_type, type):
+            self._value_type=value_type       
+            self._state = ParamState.Initialized
+            self._default = lenght*[None]
+            self._values = lenght*[None]
         else:
             self._default = [value_type]
             self._value_type=type(value_type)
-            self._values = [value_type]
+            self._values = [value_type] 
+            self._state = ParamState.Specified
     
     def getDefaultValue(self, index=0):
         return self._default[index]
@@ -71,16 +84,26 @@ class Param:
     def paramTypeIs(self, ptype):
         return self._param_type == ptype
         
+    def setValue(self, value, index=0):
+        if isinstance(value, self._value_type):
+            self._values[index] = value
+        else: 
+            log.error("setValue", self._key+": "+str(type(value))+"!="+str(self._value_type))
+            return
+        self._state = ParamState.Specified
+            
     def setValues(self, value):
         if isinstance(value, list):
             if isinstance(value[0], self._value_type):
                 self._values = value
             else: 
-                log.error("setValues", str(value[0])+"!="+str(self._value_type))
+                log.error("setValuesList", str(type(value[0]))+"!="+str(self._value_type))
         elif isinstance(value, self._value_type):
             self._values = [value]
         else: 
-            log.error("setValues", str(value)+"!="+str(self._value_type))
+            log.error("setValuesSingle", str(type(value))+"!="+str(self._value_type))
+            return
+        self._state = ParamState.Specified
 
     def find(self, value):
         for v in enumerate(self._values):
@@ -155,9 +178,18 @@ class ParamHandler:
         for key, param in other._params.iteritems():
             if self.hasParam(key):
                 t = self._params[key]
-                if not keep_offline or (t.paramType()!=ParamTypes.Offline and t.paramType()!=ParamTypes.Config):
+                if not keep_offline or (t.paramType()!=ParamTypes.Offline and t.paramType()!=ParamTypes.Config and t.paramType()!=ParamTypes.System):
                     t.setValues(param.getValues())
         
+    def specifyParams(self, other):
+        """
+        Set the input params and default value
+        """
+        for key, param in other._params.iteritems():
+            if self.hasParam(key):
+                self._params[key].setValues(param.getValues())
+                self._params[key].makeDefault(param.getValues())
+                    
     def hasParam(self, key):
         """
         Check that a key exists and return false otherwise
@@ -184,8 +216,7 @@ class ParamHandler:
         if self.hasParam(key):
             return self._params[key]
         else:
-            log.error('getParam', 'Param {} is not in the map.'.format(key))
-            print self.printState()
+            log.error('getParam', 'Param {} is not in the map. Debug: {}'.format(key, self.printState()))
         
     def specifyDefault(self, key, values):
         self.specify(key, values)
@@ -195,20 +226,19 @@ class ParamHandler:
         if self.hasParam(key):
             self._params[key].setValues(values)
         else:
-            log.error('specify', 'Param {} is not in the map.'.format(key))
-            print self.printState()
+            log.error('specify', 'Param {} is not in the map. Debug: {}'.format(key, self.printState()))
             
     def getParamValue(self, key):
         if self.hasParam(key):
             return self._params[key].getValues()[0]
         else:
-            log.error('getParamValue', 'Param {} is not in the map.'.format(key))
+            log.error('getParamValue', 'Param {} is not in the map. Debug: {}'.format(key, self.printState()))
         
     def getParamValues(self, key):
         if self.hasParam(key):
             return self._params[key].getValues()
         else:
-            log.error('getParamValues', 'Param {} is not in the map.'.format(key))
+            log.error('getParamValues', 'Param {} is not in the map. Debug: {}'.format(key, self.printState()))
         
     def getParamMapFiltered(self, type_filter):
         to_ret = {}
@@ -225,8 +255,8 @@ class ParamHandler:
         to_ret = ""
         for _, p in self._params.iteritems():
             #if not p.hasDefaultValues():
-            if p.paramTypeIs(ParamTypes.Online):
-                to_ret += p.printState() + " "
+            #if p.paramTypeIs(ParamTypes.Online):
+            to_ret += p.printState() + " "
         return to_ret
         
         
@@ -236,3 +266,4 @@ if __name__ == '__main__':
     print ph.printState()
     ph.specify("ciao", 5)
     print ph.printState()
+    print ParamTypes(1)

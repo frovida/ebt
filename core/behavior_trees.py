@@ -1,5 +1,5 @@
 from multiprocessing.dummy import Process, Value, Event, Lock
-from enum import Enum 
+from flufl.enum import Enum 
 from copy import copy, deepcopy
 
 State = Enum('State', 'Uninitialized Idle Active Preempted Error Completed') 

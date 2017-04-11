@@ -12,7 +12,7 @@ from rdflib.namespace import RDF, RDFS, OWL, XSD, Namespace
 import numpy as np
 
 ontology=rdflib.Graph()
-ontology.load('/home/francesco/ros_ws/base_ws/src/skiros/skiros/skiros/owl/stamina.owl')
+ontology.load('data/base_ontology.owl')
 PREFIX="""
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -198,19 +198,21 @@ class WorldModel:
         props = { "type" : root._type, "label" : root._label}
         self._graph.add_node(dict(chain(props.items(),root._properties.items())), root._id)
         
-    def _printRecursive(self, root, indend):
+    def _printRecursive(self, to_ret, root, indend):
         s = root.printState()
-        print indend + s
+        to_ret = to_ret + indend + s + "\n"
         indend = "-"*(len(indend)+len(s))+"->"
         for e in self.getChildren(root._id):
-            self._printRecursive(e, indend)
+            to_ret = self._printRecursive(to_ret, e, indend)
+        return to_ret
         
     def printModel(self):
         root = self.getElement(0)
         #print str(self._graph) 
-        self._printRecursive(root, "")
+        to_ret = ""
+        to_ret = self._printRecursive(to_ret, root, "")
         #nx.draw(self._graph.networkx_graph())
-        return
+        return to_ret
         
     def getAbstractElement(self, etype, elabel):
         e = Element(etype, elabel)
@@ -220,18 +222,23 @@ class WorldModel:
     def resolveElements(self, keys, ph):
         """
         Return all elements matching the profile in input (type, label, properties and relations)
+
+        Keys: a key list pointing out the params to be resolved
+        ph: a ParamHandler class     
+        
         """
         first = {}
         couples = {}
+        print_out = False
         for key in keys:
             first[key] = np.array(self.resolveElement(ph.getParamValue(key)))
+            if not first[key].any():
+                log.warn("resolveElements", "No input found for param {}. Resolving: {}".format(key, ph.getParamValue(key).printState(True)))
         all_keys = [key for key, _ in ph._params.iteritems()]
-        #print keys
-        #for key, p in ph._params.iteritems():
-        #    print p.getValue().printState(True)
-        #Solve the relations
         coupled_keys = []
         overlap_keys = []
+        relations_done = set([])
+        #Build tuples of concording parameters
         for i in range(len(all_keys)):#Loop over all keys
             key_base = all_keys[i]
             if not isinstance(ph.getParamValue(key_base), Element): continue
@@ -240,15 +247,24 @@ class WorldModel:
                 if j["src"]==-1:#-1 is the special autoreferencial value
                     key2 = j["dst"]  
                     key = key_base
-                    if all_keys.index(key2)<i:#Skip relation with previous indexes, already considered
+                    rel_id = key_base+j["type"]+j["dst"]
+                    if rel_id in relations_done:#Skip relation with previous indexes, already considered
                         continue
+                    else:
+                        #print rel_id
+                        relations_done.add(rel_id)
                 else:
                     key2 = key_base
                     key = j["src"]     
-                    if all_keys.index(key)<i:#Skip relation with previous indexes, already considered
+                    rel_id = j["src"]+j["type"]+key_base
+                    if rel_id in relations_done:#Skip relation with previous indexes, already considered
                         continue
+                    else:
+                        #print rel_id
+                        relations_done.add(rel_id)
                 this = ph.getParamValue(key)
                 other = ph.getParamValue(key2)
+                #print "{} {}".format(key, key2)
                 if this._id>=0 and other._id>=0:#If both parameters are already set, no need to resolve..
                     continue
                 if this._id>=0: set1 = [this]
@@ -260,14 +276,21 @@ class WorldModel:
                     if ph.getParam(key2).paramType()==params.ParamTypes.Optional: continue 
                     else: set2 = first[key2]
                 if (key, key2) in couples:
-                    couples[(key, key2)] = np.concatenate((couples[(key, key2)], np.array([np.array([e1, e2]) for e1 in set1 for e2 in set2 if self.getRelations(e1._id, j["type"], e2._id)])))
+                    temp = [np.array([e1, e2]) for e1 in set1 for e2 in set2 if bool(self.getRelations(e1._id, j["type"], e2._id)) == j['state']]
+                    if temp:
+                        couples[(key, key2)] = np.concatenate(couples[(key, key2)], np.array(temp))
+                    else:
+                        log.warn("resolveElements", "No input for params {} {}. Resolving: {} {}".format(key, key2, ph.getParamValue(key).printState(True), ph.getParamValue(key2).printState(True)))
                 else:
                     if key in coupled_keys: overlap_keys.append(key)
                     else: coupled_keys.append(key)
                     if key2 in coupled_keys: overlap_keys.append(key2)
                     else: coupled_keys.append(key2)
-                    couples[(key, key2)] = np.array([np.array([e1, e2]) for e1 in set1 for e2 in set2 if self.getRelations(e1._id, j["type"], e2._id)])
-        
+                    temp = [np.array([e1, e2]) for e1 in set1 for e2 in set2 if bool(self.getRelations(e1._id, j["type"], e2._id)) == j['state']]
+                    couples[(key, key2)] = np.array(temp)
+                    if not temp:
+                        log.warn("resolveElements", "No input for params {} {}. Resolving: {} {}".format(key, key2, ph.getParamValue(key).printState(True), ph.getParamValue(key2).printState(True)))
+        #Merge the tuples with an overlapping key
         if overlap_keys:
             loop = True
             iters = 5
@@ -276,10 +299,9 @@ class WorldModel:
                 if iters==0:
                     raise
                 loop = False
-                coupled_keys = []
+                coupled_keys2 = []
                 merged = {}
                 #print 'qui:'
-                #print couples         
                 for k1, s1 in couples.iteritems():
                     for k2, s2 in couples.iteritems():
                         shared_k = [k for k in k1 if k in k2]
@@ -288,27 +310,38 @@ class WorldModel:
                         loop = True
                         skip = True
                         for i in k1:
-                            if not i in coupled_keys:
-                                coupled_keys.append(i)
+                            if not i in coupled_keys2:
+                                coupled_keys2.append(i)
                                 skip=False
                         for i in k2:
-                            if not i in coupled_keys:
-                                coupled_keys.append(i)
+                            if not i in coupled_keys2:
+                                coupled_keys2.append(i)
                                 skip=False
                         if skip: continue#If it was already considered, skip
                         rk, rs = self._intersect2(k1,k2,s1,s2, shared_k)
-                        merged[rk] = rs
-                for key in keys:#Add back not merged couples
-                    if not key in coupled_keys:
+                        merged[rk] = rs#Temporary store merged tuple
+                for key in keys:#Add not merged tuples
+                    if not key in coupled_keys2:
                         for k1, s1 in couples.iteritems():
                             if key in k1:
                                 merged[k1] = s1 
                 couples = merged   
-            #log.error("", "Not solving the overlap!")
-        for key in keys:#Add back not merged keys
+        #Add back keys that are not coupled to others
+        for key in keys:
             if not key in coupled_keys:
                 couples[key] = first[key]
-        #print couples
+        if print_out:
+            for k, v in couples.iteritems():
+                s = "{}:".format(k)
+                for i in v:
+                    if not isinstance(i, Element):
+                        s += "["
+                        for j in i:
+                            s += "{},".format(j)
+                        s += "]"
+                    else:                        
+                        s += "{},".format(i)
+                print s
         return couples
         
     def _checkEqual(self, lst):
@@ -396,7 +429,6 @@ class WorldModel:
         """
         first = []
         to_ret = []
-        #print 'description ' + description.printState(True)
         #Get all nodes matching type and label
         #print getSubClasses(STMN[description._type], True)
         for _, e in self._graph.get_nodes().items():
@@ -411,6 +443,8 @@ class WorldModel:
                     add = False
                     break
                 for v in p.getValues(): 
+                    if v == "" or v==None:
+                        break
                     if not v in e.getPropertyValue(k):
                         add = False
                         break
@@ -418,7 +452,6 @@ class WorldModel:
                     break
             if add:
                 to_ret.append(e)
-        #print to_ret
         return to_ret
 
     def _makeElement(self, props):

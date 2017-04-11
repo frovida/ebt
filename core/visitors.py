@@ -25,6 +25,7 @@ class VisitorInterface:
         self._state = state  
         
     def traverse(self, root):
+        self.onStart(root)
         self.setState(State.Active)
         if not root.visit(self):
             self.processingDone(root)
@@ -71,6 +72,10 @@ class VisitorInterface:
         """ Not implemented in abstract class. """
         raise NotImplementedError("Not implemented in abstract class")
         
+    def onStart(self, procedure):
+        """ Optional - Not implemented in abstract class. """
+        return True
+        
     def processingDone(self, procedure):
         """ Optional - Not implemented in abstract class. """
         return True
@@ -95,7 +100,7 @@ class VisitorPrint(VisitorInterface, NodePrinter, NodeExecutor):
         
     def processNode(self, procedure):
         self.init(procedure)
-        self.printProcedure(procedure, self._verbose)
+        self._procedure_printed = self._procedure_printed + self.printProcedure(procedure, self._verbose) + "\n"
         self.indend()
         return True
         
@@ -106,6 +111,13 @@ class VisitorPrint(VisitorInterface, NodePrinter, NodeExecutor):
     def postProcessNode(self, procedure):
         self.unindend()
         return True
+        
+    def onStart(self, procedure):
+        self._procedure_printed = ""
+        return True
+    
+    def getPrint(self):
+        return self._procedure_printed
     
 class VisitorExecutor(VisitorInterface, NodePrinter, NodeExecutor):
     """
@@ -129,9 +141,6 @@ class VisitorExecutor(VisitorInterface, NodePrinter, NodeExecutor):
         self._verbose=verbose
               
     def processNode(self, procedure):
-        #self.init(procedure)
-        #procedure.setInput(self._params)
-        #self.printProcedure(procedure)
         if not self.execute(procedure):
             self.printProcedure(procedure)
             log.error(procedure._label, "Failed")
@@ -167,6 +176,7 @@ class VisitorReversibleSimulator(VisitorInterface, NodePrinter, NodeReversibleSi
         self._execution_branch = []
         self._forget_branch = []
         self.visitor = VisitorPrint(self._wm, self._instanciator)
+        self._bound = {}
               
     def setVerbose(self, verbose):
         self._verbose=verbose
